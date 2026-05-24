@@ -1,0 +1,10 @@
+.env
+.claude/
+node_modules/
+dist/
+web-dist/
+.tmp/
+*.xlsx
+ynab_*.json
+workbook_summary.json
+retirement_analysis.md

@@ -1,0 +1,128 @@
+import { Info } from "lucide-react";
+import type { ReactElement } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { CashFlowTiming } from "../retirementDate.js";
+import type { YearMonth } from "../types.js";
+import { formatInputNumber, timingSelectValue } from "./format.js";
+import type { NumberFormatKind } from "./types.js";
+
+export function TextField(props: {
+  label: string;
+  value: string;
+  unit: string;
+  help: string;
+  onChange: (value: string) => void;
+}): ReactElement {
+  return (
+    <label className="field">
+      <FieldLabel label={props.label} unit={props.unit} help={props.help} />
+      <input value={props.value} onChange={(event) => props.onChange(event.target.value)} />
+    </label>
+  );
+}
+
+export function NumberField(props: {
+  label: string;
+  unit: string;
+  value: number;
+  kind: NumberFormatKind;
+  help: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}): ReactElement {
+  return (
+    <label className="field">
+      <FieldLabel label={props.label} unit={props.unit} help={props.help} />
+      <UnitInput
+        ariaLabel={props.label}
+        value={props.value}
+        kind={props.kind}
+        unit={props.unit}
+        disabled={props.disabled}
+        onChange={props.onChange}
+      />
+    </label>
+  );
+}
+
+export function FieldLabel(props: { label: string; unit: string; help: string }): ReactElement {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleMouseDown(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, [open]);
+
+  return (
+    <span className="field-label" ref={ref}>
+      <span>{props.label}</span>
+      <button type="button" className="info-button" aria-label={`About ${props.label}`} onClick={() => setOpen((current) => !current)}>
+        <Info size={14} />
+      </button>
+      {open ? <span className="field-help">{props.help}</span> : null}
+    </span>
+  );
+}
+
+export function UnitInput(props: {
+  ariaLabel: string;
+  value: number;
+  kind: NumberFormatKind;
+  unit: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}): ReactElement {
+  const [editingValue, setEditingValue] = useState<string | null>(null);
+  const prefix = props.kind === "money" ? "$" : "";
+  const suffix = props.kind === "percent" ? "%" : props.kind === "age" ? "yrs" : "";
+  return (
+    <span className={`unit-input ${props.disabled ? "unit-input-disabled" : ""}`}>
+      {prefix ? <span className="unit-prefix">{prefix}</span> : null}
+      <input
+        aria-label={props.ariaLabel}
+        inputMode="decimal"
+        value={editingValue ?? formatInputNumber(props.value, props.kind)}
+        disabled={props.disabled}
+        onFocus={() => setEditingValue(formatInputNumber(props.value, props.kind))}
+        onChange={(event) => {
+          setEditingValue(event.target.value);
+          props.onChange(event.target.value);
+        }}
+        onBlur={() => setEditingValue(null)}
+      />
+      {suffix ? <span className="unit-suffix" aria-hidden="true">{suffix}</span> : null}
+    </span>
+  );
+}
+
+export function TimingInput(props: {
+  label: string;
+  value: CashFlowTiming;
+  onChange: (value: CashFlowTiming) => void;
+}): ReactElement {
+  const value = props.value === "now" || props.value === "atRetirement" ? props.value : "date";
+  return (
+    <span className="timing-input">
+      <select aria-label={props.label} value={value} onChange={(event) => props.onChange(timingSelectValue(event.target.value))}>
+        <option value="now">Now</option>
+        <option value="atRetirement">At retirement</option>
+        <option value="date">Specific month</option>
+      </select>
+      {value === "date" ? (
+        <input
+          aria-label={`${props.label} month`}
+          value={props.value === "now" || props.value === "atRetirement" ? "" : props.value}
+          placeholder="YYYY-MM"
+          onChange={(event) => props.onChange(event.target.value as YearMonth)}
+        />
+      ) : null}
+    </span>
+  );
+}
