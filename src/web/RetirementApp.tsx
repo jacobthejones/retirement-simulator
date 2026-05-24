@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { useEffect, useRef, useState } from "react";
+import { Analytics } from "@vercel/analytics/react";
 import {
   defaultRetirementPlanInputs,
   type RetirementPlanInputs,
@@ -138,6 +139,7 @@ export function App(): ReactElement {
 
   return (
     <main className="app-shell">
+      <Analytics />
       <header className="app-header">
         <div>
           <p className="eyebrow">Retirement date simulator</p>
