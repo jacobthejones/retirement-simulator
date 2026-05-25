@@ -110,8 +110,3 @@ export function monthIndex(month: YearMonth): number {
   const [year, monthText] = month.split("-");
   return Number(year) * 12 + Number(monthText);
 }
-
-export function timingSelectValue(value: string): CashFlowTiming {
-  if (value === "now" || value === "atRetirement") return value;
-  return "now";
-}
