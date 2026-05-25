@@ -3,7 +3,7 @@ import type { ReactElement } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { CashFlowTiming } from "../retirementDate.js";
 import type { YearMonth } from "../types.js";
-import { formatInputNumber, timingSelectValue } from "./format.js";
+import { formatInputNumber } from "./format.js";
 import type { NumberFormatKind } from "./types.js";
 
 export function TextField(props: {
@@ -107,19 +107,31 @@ export function TimingInput(props: {
   value: CashFlowTiming;
   onChange: (value: CashFlowTiming) => void;
 }): ReactElement {
-  const value = props.value === "now" || props.value === "atRetirement" ? props.value : "date";
+  const selectValue = props.value === "now" || props.value === "atRetirement" ? props.value : "date";
+
+  function handleSelectChange(event: { target: { value: string } }): void {
+    const val = event.target.value;
+    if (val === "now" || val === "atRetirement") {
+      props.onChange(val);
+    } else {
+      const now = new Date();
+      const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` as YearMonth;
+      props.onChange(defaultMonth);
+    }
+  }
+
   return (
     <span className="timing-input">
-      <select aria-label={props.label} value={value} onChange={(event) => props.onChange(timingSelectValue(event.target.value))}>
+      <select aria-label={props.label} value={selectValue} onChange={handleSelectChange}>
         <option value="now">Now</option>
         <option value="atRetirement">At retirement</option>
         <option value="date">Specific month</option>
       </select>
-      {value === "date" ? (
+      {selectValue === "date" ? (
         <input
+          type="month"
           aria-label={`${props.label} month`}
           value={props.value === "now" || props.value === "atRetirement" ? "" : props.value}
-          placeholder="YYYY-MM"
           onChange={(event) => props.onChange(event.target.value as YearMonth)}
         />
       ) : null}
