@@ -132,6 +132,13 @@ export type RecipeAction =
       period?: RecipeAmountPeriod;
     }
   | {
+      type: "setRetirementSpendingFromPortfolioPercentage";
+      annualPercentage: number;
+      accountIds?: AccountId[];
+      minimumAmount?: number;
+      minimumPeriod?: RecipeAmountPeriod;
+    }
+  | {
       type: "addAmount";
       accountId: AccountId;
       assetClass?: AssetClass;
@@ -150,6 +157,18 @@ export type RecipeAction =
       amount: number;
       period?: RecipeAmountPeriod;
       inflationAdjusted?: boolean;
+      limitToAvailable?: boolean;
+      kind?: EventKind;
+      description?: string;
+    }
+  | {
+      type: "topUpAccount";
+      accountId: AccountId;
+      assetClass?: AssetClass;
+      targetBalance: number;
+      fromAccountId: AccountId;
+      fromAssetClass?: AssetClass;
+      penaltyRate?: number;
       limitToAvailable?: boolean;
       kind?: EventKind;
       description?: string;
@@ -412,9 +431,24 @@ export function retirementSpendingForState(
     if (!recipeRuleMatches(rule, state, retirementStart)) continue;
 
     for (const action of rule.actions) {
-      if (action.type !== "setRetirementSpending") continue;
-      monthlyAmount = action.period === "annual" ? action.amount / 12 : action.amount;
-      ruleIds.push(rule.id);
+      if (action.type === "setRetirementSpending") {
+        monthlyAmount = action.period === "annual" ? action.amount / 12 : action.amount;
+        ruleIds.push(rule.id);
+      } else if (action.type === "setRetirementSpendingFromPortfolioPercentage") {
+        const portfolioTotal = (action.accountIds ?? [NON_RETIREMENT_ACCOUNT_ID, RETIREMENT_ACCOUNT_ID]).reduce(
+          (sum, accountId) => sum + accountTotal(state.accounts, accountId),
+          0,
+        );
+        const percentageMonthlyAmount = (portfolioTotal * action.annualPercentage) / 12;
+        const minimumMonthlyAmount =
+          action.minimumAmount === undefined
+            ? 0
+            : action.minimumPeriod === "monthly"
+              ? action.minimumAmount
+              : action.minimumAmount / 12;
+        monthlyAmount = Math.max(percentageMonthlyAmount, minimumMonthlyAmount);
+        ruleIds.push(rule.id);
+      }
     }
   }
 
@@ -632,7 +666,9 @@ function recipeEffect(recipe: ScenarioRecipe | null, retirementStart: YearMonth)
         if (!recipeRuleMatches(rule, { ...state, accounts }, retirementStart)) continue;
 
         for (const action of rule.actions) {
-          if (action.type === "setRetirementSpending") continue;
+          if (action.type === "setRetirementSpending" || action.type === "setRetirementSpendingFromPortfolioPercentage") {
+            continue;
+          }
 
           if (action.type === "addAmount") {
             const amount = recipeActionAmount(action, state);
@@ -649,7 +685,7 @@ function recipeEffect(recipe: ScenarioRecipe | null, retirementStart: YearMonth)
               description: action.description ?? rule.description ?? `Applied recipe rule ${rule.id}.`,
               metadata: { recipeRuleId: rule.id, actionType: action.type },
             });
-          } else {
+          } else if (action.type === "transfer") {
             const requestedAmount = recipeActionAmount(action, state);
             const available = getBalance(accounts, action.fromAccountId, action.fromAssetClass ?? "cash");
             const amount = action.limitToAvailable ? roundMoney(Math.min(Math.max(0, available), requestedAmount)) : requestedAmount;
@@ -670,6 +706,41 @@ function recipeEffect(recipe: ScenarioRecipe | null, retirementStart: YearMonth)
                 actionType: action.type,
                 toAccountId: action.toAccountId,
                 toAssetClass,
+              },
+            });
+          } else {
+            const assetClass = action.assetClass ?? "cash";
+            const currentBalance = getBalance(accounts, action.accountId, assetClass);
+            const deficit = roundMoney(Math.max(0, action.targetBalance - currentBalance));
+            if (deficit === 0) continue;
+
+            const penaltyRate = action.penaltyRate ?? 0;
+            const grossNeeded = roundMoney(deficit / Math.max(0.01, 1 - penaltyRate));
+            const fromAssetClass = action.fromAssetClass ?? "cash";
+            const available = getBalance(accounts, action.fromAccountId, fromAssetClass);
+            const grossAmount = action.limitToAvailable ? roundMoney(Math.min(Math.max(0, available), grossNeeded)) : grossNeeded;
+            const netAmount = roundMoney(grossAmount * (1 - penaltyRate));
+            if (grossAmount === 0 || netAmount === 0) continue;
+
+            accounts = addToBalance(accounts, action.fromAccountId, fromAssetClass, -grossAmount);
+            accounts = addToBalance(accounts, action.accountId, assetClass, netAmount);
+            events.push({
+              month: state.month,
+              effectId: `recipe-${rule.id}`,
+              kind: action.kind ?? "transfer",
+              accountId: action.fromAccountId,
+              assetClass: fromAssetClass,
+              amount: -grossAmount,
+              description: action.description ?? rule.description ?? `Applied recipe rule ${rule.id}.`,
+              metadata: {
+                recipeRuleId: rule.id,
+                actionType: action.type,
+                toAccountId: action.accountId,
+                toAssetClass: assetClass,
+                targetBalance: action.targetBalance,
+                deficit,
+                penaltyRate,
+                netProvided: netAmount,
               },
             });
           }
@@ -772,11 +843,23 @@ function validateRecipeRule(rule: unknown, index: number, accountIds: Set<string
     if (!action || typeof action !== "object") throw new Error(`Recipe rule ${candidate.id} has an invalid action.`);
     const maybeAction = action as Partial<RecipeAction>;
     const maybeKind = (action as { kind?: unknown }).kind;
-    if (maybeAction.type !== "setRetirementSpending" && maybeAction.type !== "addAmount" && maybeAction.type !== "transfer") {
+    const maybePeriod = (action as { period?: unknown }).period;
+    if (
+      maybeAction.type !== "setRetirementSpending" &&
+      maybeAction.type !== "setRetirementSpendingFromPortfolioPercentage" &&
+      maybeAction.type !== "addAmount" &&
+      maybeAction.type !== "transfer" &&
+      maybeAction.type !== "topUpAccount"
+    ) {
       throw new Error(`Recipe action in ${candidate.id} has an unsupported type.`);
     }
-    if (!Number.isFinite(maybeAction.amount)) throw new Error(`Recipe action in ${candidate.id} must include a finite amount.`);
-    if (maybeAction.period !== undefined && maybeAction.period !== "monthly" && maybeAction.period !== "annual") {
+    if (
+      (maybeAction.type === "setRetirementSpending" || maybeAction.type === "addAmount" || maybeAction.type === "transfer") &&
+      !Number.isFinite(maybeAction.amount)
+    ) {
+      throw new Error(`Recipe action in ${candidate.id} must include a finite amount.`);
+    }
+    if (maybePeriod !== undefined && maybePeriod !== "monthly" && maybePeriod !== "annual") {
       throw new Error(`Recipe action in ${candidate.id} has an unsupported period.`);
     }
     if (maybeKind !== undefined && (typeof maybeKind !== "string" || !RECIPE_EVENT_KINDS.has(maybeKind as EventKind))) {
@@ -796,6 +879,45 @@ function validateRecipeRule(rule: unknown, index: number, accountIds: Set<string
       }
       if (!accountIds.has(maybeAction.toAccountId)) {
         throw new Error(`Recipe transfer action in ${candidate.id} references unknown account ${maybeAction.toAccountId}.`);
+      }
+    }
+    if (maybeAction.type === "setRetirementSpendingFromPortfolioPercentage") {
+      if (!Number.isFinite(maybeAction.annualPercentage)) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} must include a finite annualPercentage.`);
+      }
+      if (maybeAction.minimumAmount !== undefined && !Number.isFinite(maybeAction.minimumAmount)) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} has an invalid minimumAmount.`);
+      }
+      if (
+        maybeAction.minimumPeriod !== undefined &&
+        maybeAction.minimumPeriod !== "monthly" &&
+        maybeAction.minimumPeriod !== "annual"
+      ) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} has an unsupported minimumPeriod.`);
+      }
+      for (const accountId of maybeAction.accountIds ?? []) {
+        if (!accountIds.has(accountId)) {
+          throw new Error(`Recipe portfolio spending action in ${candidate.id} references unknown account ${accountId}.`);
+        }
+      }
+    }
+    if (maybeAction.type === "topUpAccount") {
+      if (!maybeAction.accountId) throw new Error(`Recipe topUpAccount action in ${candidate.id} must include an accountId.`);
+      if (!accountIds.has(maybeAction.accountId)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} references unknown account ${maybeAction.accountId}.`);
+      }
+      if (!maybeAction.fromAccountId) throw new Error(`Recipe topUpAccount action in ${candidate.id} must include a fromAccountId.`);
+      if (!accountIds.has(maybeAction.fromAccountId)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} references unknown account ${maybeAction.fromAccountId}.`);
+      }
+      if (!Number.isFinite(maybeAction.targetBalance)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} must include a finite targetBalance.`);
+      }
+      if (
+        maybeAction.penaltyRate !== undefined &&
+        (!Number.isFinite(maybeAction.penaltyRate) || maybeAction.penaltyRate < 0 || maybeAction.penaltyRate >= 1)
+      ) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} has an invalid penaltyRate.`);
       }
     }
   }

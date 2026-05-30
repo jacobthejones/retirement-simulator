@@ -250,6 +250,99 @@ describe("software correctness verification", () => {
     expect(spendingEvent?.metadata?.recipeRuleIds).toEqual(["guardrail"]);
   });
 
+  it("can set retirement spending to a portfolio percentage with a monthly floor", () => {
+    const inputs: RetirementPlanInputs = {
+      ...defaultRetirementPlanInputs,
+      startMonth: "2026-01",
+      birthYear: 1970,
+      estimatedDeathAge: 57,
+      accessiblePortfolio: 2_400_000,
+      retirementPortfolio: 600_000,
+      allocation: { stocks: 0, bonds: 0, cash: 100 },
+      monthlyIncome: 0,
+      monthlyExpenses: 0,
+      monthlyRetirementContribution: 0,
+      monthlyRetirementSpending: 1,
+      recipeJson: JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: "four-percent-with-floor",
+            when: { source: "retired", equals: true },
+            actions: [
+              {
+                type: "setRetirementSpendingFromPortfolioPercentage",
+                annualPercentage: 0.04,
+                accountIds: ["nonRetirementPortfolio", "retirementPortfolio"],
+                minimumAmount: 5_200,
+                minimumPeriod: "monthly",
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const result = runSimulation(buildRetirementDateConfig(inputs, "2026-01"));
+    const spendingEvent = result.events.find((event) => event.effectId === "retirement-spending");
+
+    expect(spendingEvent?.amount).toBe(-10_000);
+    expect(spendingEvent?.metadata?.recipeRuleIds).toEqual(["four-percent-with-floor"]);
+  });
+
+  it("can top up an account from retirement funds with an early-withdrawal penalty", () => {
+    const inputs: RetirementPlanInputs = {
+      ...defaultRetirementPlanInputs,
+      startMonth: "2026-01",
+      birthYear: 1970,
+      estimatedDeathAge: 57,
+      accessiblePortfolio: 40_000,
+      retirementPortfolio: 100_000,
+      allocation: { stocks: 0, bonds: 0, cash: 100 },
+      monthlyIncome: 0,
+      monthlyExpenses: 0,
+      monthlyRetirementContribution: 0,
+      monthlyRetirementSpending: 0,
+      recipeJson: JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: "taxable-cash-reserve",
+            when: [
+              { source: "retired", equals: true },
+              {
+                source: "accountBalance",
+                accountId: "nonRetirementPortfolio",
+                assetClass: "cash",
+                operator: "<",
+                value: 50_000,
+              },
+            ],
+            actions: [
+              {
+                type: "topUpAccount",
+                accountId: "nonRetirementPortfolio",
+                assetClass: "cash",
+                targetBalance: 50_000,
+                fromAccountId: "retirementPortfolio",
+                fromAssetClass: "cash",
+                penaltyRate: 0.2,
+                limitToAvailable: true,
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const config = buildRetirementDateConfig(inputs, "2026-01");
+    const result = runSimulation({ ...config, months: 1, effects: config.effects.filter((effect) => effect.id === "recipe-actions"), checks: [] });
+
+    expect(result.finalState.accounts.nonRetirementPortfolio!.balances.cash).toBe(50_000);
+    expect(result.finalState.accounts.retirementPortfolio!.balances.cash).toBe(87_500);
+    expect(result.events[0]?.metadata).toMatchObject({ deficit: 10_000, penaltyRate: 0.2, netProvided: 10_000 });
+  });
+
   it("applies recipe addAmount and transfer actions using the current inflation index", () => {
     const inputs: RetirementPlanInputs = {
       ...defaultRetirementPlanInputs,
