@@ -256,8 +256,8 @@ describe("software correctness verification", () => {
       startMonth: "2026-01",
       birthYear: 1970,
       estimatedDeathAge: 57,
-      accessiblePortfolio: 2_400_000,
-      retirementPortfolio: 600_000,
+      accessiblePortfolio: 4_800_000,
+      retirementPortfolio: 1_200_000,
       allocation: { stocks: 0, bonds: 0, cash: 100 },
       monthlyIncome: 0,
       monthlyExpenses: 0,
@@ -283,11 +283,63 @@ describe("software correctness verification", () => {
       }),
     };
 
-    const result = runSimulation(buildRetirementDateConfig(inputs, "2026-01"));
+    const config = buildRetirementDateConfig(inputs, "2026-01");
+    const result = runSimulation({
+      ...config,
+      months: 1,
+      inflationIndex: 2,
+      effects: config.effects.filter((effect) => effect.id === "retirement-spending"),
+      checks: [],
+    });
     const spendingEvent = result.events.find((event) => event.effectId === "retirement-spending");
 
-    expect(spendingEvent?.amount).toBe(-10_000);
+    expect(spendingEvent?.amount).toBe(-20_000);
     expect(spendingEvent?.metadata?.recipeRuleIds).toEqual(["four-percent-with-floor"]);
+  });
+
+  it("does not inflation-adjust portfolio percentage retirement spending twice", () => {
+    const inputs: RetirementPlanInputs = {
+      ...defaultRetirementPlanInputs,
+      startMonth: "2026-01",
+      birthYear: 1970,
+      estimatedDeathAge: 57,
+      accessiblePortfolio: 6_000_000,
+      retirementPortfolio: 0,
+      allocation: { stocks: 0, bonds: 0, cash: 100 },
+      monthlyIncome: 0,
+      monthlyExpenses: 0,
+      monthlyRetirementContribution: 0,
+      monthlyRetirementSpending: 1,
+      recipeJson: JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: "four-percent",
+            when: { source: "retired", equals: true },
+            actions: [
+              {
+                type: "setRetirementSpendingFromPortfolioPercentage",
+                annualPercentage: 0.04,
+                accountIds: ["nonRetirementPortfolio", "retirementPortfolio"],
+                minimumAmount: 1,
+                minimumPeriod: "monthly",
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const config = buildRetirementDateConfig(inputs, "2026-01");
+    const result = runSimulation({
+      ...config,
+      months: 1,
+      inflationIndex: 2,
+      effects: config.effects.filter((effect) => effect.id === "retirement-spending"),
+      checks: [],
+    });
+
+    expect(result.events.find((event) => event.effectId === "retirement-spending")?.amount).toBe(-20_000);
   });
 
   it("can top up an account from retirement funds with an early-withdrawal penalty", () => {

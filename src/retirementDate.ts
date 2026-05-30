@@ -424,7 +424,7 @@ export function retirementSpendingForState(
   retirementStart: YearMonth,
   recipe: ScenarioRecipe | null = parseScenarioRecipe(inputs.recipeJson),
 ): { monthlyAmount: number; ruleIds: string[] } {
-  let monthlyAmount = inputs.monthlyRetirementSpending;
+  let monthlyAmount = inputs.monthlyRetirementSpending * state.inflationIndex;
   const ruleIds: string[] = [];
 
   for (const rule of recipe?.rules ?? []) {
@@ -432,7 +432,7 @@ export function retirementSpendingForState(
 
     for (const action of rule.actions) {
       if (action.type === "setRetirementSpending") {
-        monthlyAmount = action.period === "annual" ? action.amount / 12 : action.amount;
+        monthlyAmount = (action.period === "annual" ? action.amount / 12 : action.amount) * state.inflationIndex;
         ruleIds.push(rule.id);
       } else if (action.type === "setRetirementSpendingFromPortfolioPercentage") {
         const portfolioTotal = (action.accountIds ?? [NON_RETIREMENT_ACCOUNT_ID, RETIREMENT_ACCOUNT_ID]).reduce(
@@ -443,9 +443,8 @@ export function retirementSpendingForState(
         const minimumMonthlyAmount =
           action.minimumAmount === undefined
             ? 0
-            : action.minimumPeriod === "monthly"
-              ? action.minimumAmount
-              : action.minimumAmount / 12;
+            : (action.minimumPeriod === "monthly" ? action.minimumAmount : action.minimumAmount / 12) *
+              state.inflationIndex;
         monthlyAmount = Math.max(percentageMonthlyAmount, minimumMonthlyAmount);
         ruleIds.push(rule.id);
       }
@@ -575,7 +574,7 @@ function retirementWithdrawalEffect(
     appliesTo: (state) => compareYearMonth(state.month, retirementStart) >= 0,
     apply: (state) => {
       const recipeSpending = retirementSpendingForState(inputs, state, retirementStart, recipe);
-      const spending = roundMoney(recipeSpending.monthlyAmount * state.inflationIndex);
+      const spending = roundMoney(recipeSpending.monthlyAmount);
       const accessMonth = retirementAccessMonth(inputs);
       const events: SimulationEvent[] = [];
       let accounts = state.accounts;
