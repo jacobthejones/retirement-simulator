@@ -9,6 +9,7 @@ import type { YearMonth } from "../types.js";
 import { NumberField, TextField } from "./fields.js";
 import { parseNumber } from "./format.js";
 import { ModifierEditor } from "./ModifierEditor.js";
+import { RecipeEditor } from "./RecipeEditor.js";
 import type { NumericField, ScenarioState } from "./types.js";
 
 const fieldHelp = {
@@ -202,6 +203,7 @@ export function ScenarioEditor(props: {
       </p>
 
       <ModifierEditor inputs={inputs} onChange={props.onChange} />
+      <RecipeEditor inputs={inputs} onChange={props.onChange} />
 
       {props.selectedScenario.error ? <p className="error-text">{props.selectedScenario.error}</p> : null}
     </article>

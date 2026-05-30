@@ -18,7 +18,20 @@ function loadState(): { scenarios: ScenarioState[]; selectedScenarioId: string }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as { scenarios: ScenarioState[]; selectedScenarioId: string };
+    const state = JSON.parse(raw) as { scenarios: ScenarioState[]; selectedScenarioId: string };
+    return {
+      ...state,
+      scenarios: state.scenarios.map((scenario) => ({
+        ...scenario,
+        inputs: {
+          ...defaultRetirementPlanInputs,
+          ...scenario.inputs,
+          allocation: { ...defaultRetirementPlanInputs.allocation, ...scenario.inputs.allocation },
+          modifiers: scenario.inputs.modifiers ?? [],
+          recipeJson: scenario.inputs.recipeJson ?? "",
+        },
+      })),
+    };
   } catch {
     return null;
   }

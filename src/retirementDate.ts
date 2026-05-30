@@ -4,8 +4,8 @@ import { addMonths, compareYearMonth, formatYearMonth, parseYearMonth } from "./
 import { rebalanceAccount } from "./effects.js";
 import { runSimulation } from "./engine.js";
 import { historicalInflationEffect, historicalReturnEffect, runHistoricalSimulations, type HistoricalSimulationRun, type HistoricalSimulationSet } from "./historical.js";
-import { addToBalance, getBalance, roundMoney, setBalance } from "./money.js";
-import type { Account, Accounts, AssetClass, Effect, SimulationConfig, SimulationEvent, SimulationState, YearMonth } from "./types.js";
+import { addToBalance, getBalance, roundMoney, setBalance, transferBalance } from "./money.js";
+import type { Account, AccountId, AccountKind, Accounts, AssetClass, Effect, EventKind, SimulationConfig, SimulationEvent, SimulationState, YearMonth } from "./types.js";
 
 export type ScenarioId = string;
 
@@ -26,6 +26,7 @@ export interface RetirementPlanInputs {
   allowEarlyRetirementAccess: boolean;
   earlyWithdrawalPenalty: number;
   modifiers: CashFlowModifier[];
+  recipeJson: string;
 }
 
 export interface AssetAllocation {
@@ -50,6 +51,128 @@ export interface CashFlowModifier {
   start: CashFlowTiming;
   end?: CashFlowTiming;
 }
+
+export type RecipeComparisonOperator = "<" | "<=" | ">" | ">=" | "==" | "!=";
+
+export interface ScenarioRecipe {
+  version?: 1;
+  accounts?: RecipeAccount[];
+  rules: RecipeRule[];
+}
+
+export interface RecipeAccount {
+  id: string;
+  name: string;
+  kind: AccountKind;
+  balances: Record<AssetClass, number>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RecipeRule {
+  id: string;
+  description?: string;
+  when?: RecipeCondition | RecipeCondition[];
+  actions: RecipeAction[];
+}
+
+export type RecipeCondition =
+  | {
+      source: "accountTotal";
+      accountId: string;
+      operator: RecipeComparisonOperator;
+      value: number;
+    }
+  | {
+      source: "accountBalance";
+      accountId: string;
+      assetClass: AssetClass;
+      operator: RecipeComparisonOperator;
+      value: number;
+    }
+  | {
+      source: "portfolioTotal";
+      accountIds?: string[];
+      operator: RecipeComparisonOperator;
+      value: number;
+    }
+  | {
+      source: "monthIndex";
+      operator: RecipeComparisonOperator;
+      value: number;
+    }
+  | {
+      source: "month";
+      operator: RecipeComparisonOperator;
+      value: YearMonth;
+    }
+  | {
+      source: "retired";
+      equals: boolean;
+    };
+
+export type RecipeAmountPeriod = "monthly" | "annual";
+const RECIPE_EVENT_KINDS = new Set<EventKind>([
+  "income",
+  "expense",
+  "transfer",
+  "return",
+  "inflation",
+  "purchase",
+  "sale",
+  "debt-payment",
+  "check",
+  "failure",
+  "note",
+]);
+
+export type RecipeAction =
+  | {
+      type: "setRetirementSpending";
+      amount: number;
+      period?: RecipeAmountPeriod;
+    }
+  | {
+      type: "setRetirementSpendingFromPortfolioPercentage";
+      annualPercentage: number;
+      accountIds?: AccountId[];
+      minimumAmount?: number;
+      minimumPeriod?: RecipeAmountPeriod;
+    }
+  | {
+      type: "addAmount";
+      accountId: AccountId;
+      assetClass?: AssetClass;
+      amount: number;
+      period?: RecipeAmountPeriod;
+      inflationAdjusted?: boolean;
+      kind?: EventKind;
+      description?: string;
+    }
+  | {
+      type: "transfer";
+      fromAccountId: AccountId;
+      fromAssetClass?: AssetClass;
+      toAccountId: AccountId;
+      toAssetClass?: AssetClass;
+      amount: number;
+      period?: RecipeAmountPeriod;
+      inflationAdjusted?: boolean;
+      limitToAvailable?: boolean;
+      kind?: EventKind;
+      description?: string;
+    }
+  | {
+      type: "topUpAccount";
+      accountId: AccountId;
+      assetClass?: AssetClass;
+      targetBalance: number;
+      fromAccountId: AccountId;
+      fromAssetClass?: AssetClass;
+      penaltyRate?: number;
+      limitToAvailable?: boolean;
+      kind?: EventKind;
+      description?: string;
+    };
 
 export interface RetirementSearchResult {
   inputs: RetirementPlanInputs;
@@ -91,6 +214,7 @@ export const defaultRetirementPlanInputs: RetirementPlanInputs = {
   allowEarlyRetirementAccess: true,
   earlyWithdrawalPenalty: 0.2,
   modifiers: [],
+  recipeJson: "",
 };
 
 export function findEarliestRetirementMonth(
@@ -150,6 +274,7 @@ function historicalStartYears(months: number): number[] {
 
 export function buildRetirementDateConfig(inputs: RetirementPlanInputs, retirementMonth: YearMonth): SimulationConfig {
   validateInputs(inputs);
+  const recipe = parseScenarioRecipe(inputs.recipeJson);
 
   const normalizedAllocation = normalizeAllocation(inputs.allocation);
   const endMonth = simulationEndMonth(inputs);
@@ -178,7 +303,8 @@ export function buildRetirementDateConfig(inputs: RetirementPlanInputs, retireme
     }),
     retirementContributionEffect(inputs, preRetirementEnd),
     ...modifierEffects(inputs, retirementStart, preRetirementEnd),
-    retirementWithdrawalEffect(inputs, retirementStart),
+    recipeEffect(recipe, retirementStart),
+    retirementWithdrawalEffect(inputs, retirementStart, recipe),
     rebalanceAccount({
       id: "rebalance-non-retirement",
       description: "Rebalance non-retirement portfolio to target allocation",
@@ -225,6 +351,7 @@ export function buildRetirementDateConfig(inputs: RetirementPlanInputs, retireme
         total: inputs.retirementPortfolio,
         allocation: normalizedAllocation,
       }),
+      ...recipeAccounts(recipe),
     },
     effects,
     checks: [
@@ -259,6 +386,72 @@ export function monthlySavings(inputs: RetirementPlanInputs): number {
       return sum;
     }, 0);
   return roundMoney(inputs.monthlyIncome - inputs.monthlyExpenses + modifierTotal);
+}
+
+export function parseScenarioRecipe(recipeJson: string): ScenarioRecipe | null {
+  const trimmed = recipeJson.trim();
+  if (!trimmed) return null;
+
+  const parsed: unknown = JSON.parse(trimmed);
+  if (!parsed || typeof parsed !== "object") throw new Error("Recipe must be a JSON object.");
+
+  const recipe = parsed as Partial<ScenarioRecipe>;
+  if (recipe.version !== undefined && recipe.version !== 1) {
+    throw new Error("Recipe version must be 1.");
+  }
+  if (!Array.isArray(recipe.rules)) throw new Error("Recipe must include a rules array.");
+  if (recipe.accounts !== undefined && !Array.isArray(recipe.accounts)) {
+    throw new Error("Recipe accounts must be an array.");
+  }
+
+  const accountIds = new Set<string>([NON_RETIREMENT_ACCOUNT_ID, RETIREMENT_ACCOUNT_ID]);
+  for (const account of recipe.accounts ?? []) {
+    validateRecipeAccount(account);
+    if (accountIds.has(account.id)) throw new Error(`Recipe account id is already in use: ${account.id}`);
+    accountIds.add(account.id);
+  }
+
+  recipe.rules.forEach((rule, index) => {
+    validateRecipeRule(rule, index, accountIds);
+  });
+
+  return { version: 1, accounts: recipe.accounts, rules: recipe.rules };
+}
+
+export function retirementSpendingForState(
+  inputs: RetirementPlanInputs,
+  state: SimulationState,
+  retirementStart: YearMonth,
+  recipe: ScenarioRecipe | null = parseScenarioRecipe(inputs.recipeJson),
+): { monthlyAmount: number; ruleIds: string[] } {
+  let monthlyAmount = inputs.monthlyRetirementSpending * state.inflationIndex;
+  const ruleIds: string[] = [];
+
+  for (const rule of recipe?.rules ?? []) {
+    if (!recipeRuleMatches(rule, state, retirementStart)) continue;
+
+    for (const action of rule.actions) {
+      if (action.type === "setRetirementSpending") {
+        monthlyAmount = (action.period === "annual" ? action.amount / 12 : action.amount) * state.inflationIndex;
+        ruleIds.push(rule.id);
+      } else if (action.type === "setRetirementSpendingFromPortfolioPercentage") {
+        const portfolioTotal = (action.accountIds ?? [NON_RETIREMENT_ACCOUNT_ID, RETIREMENT_ACCOUNT_ID]).reduce(
+          (sum, accountId) => sum + accountTotal(state.accounts, accountId),
+          0,
+        );
+        const percentageMonthlyAmount = (portfolioTotal * action.annualPercentage) / 12;
+        const minimumMonthlyAmount =
+          action.minimumAmount === undefined
+            ? 0
+            : (action.minimumPeriod === "monthly" ? action.minimumAmount : action.minimumAmount / 12) *
+              state.inflationIndex;
+        monthlyAmount = Math.max(percentageMonthlyAmount, minimumMonthlyAmount);
+        ruleIds.push(rule.id);
+      }
+    }
+  }
+
+  return { monthlyAmount, ruleIds };
 }
 
 export function simulationEndMonth(inputs: Pick<RetirementPlanInputs, "birthYear" | "estimatedDeathAge">): YearMonth {
@@ -370,13 +563,18 @@ function modifierEffects(inputs: RetirementPlanInputs, retirementStart: YearMont
     });
 }
 
-function retirementWithdrawalEffect(inputs: RetirementPlanInputs, retirementStart: YearMonth): Effect {
+function retirementWithdrawalEffect(
+  inputs: RetirementPlanInputs,
+  retirementStart: YearMonth,
+  recipe: ScenarioRecipe | null,
+): Effect {
   return {
     id: "retirement-spending",
     description: "Inflation-adjusted retirement spending",
     appliesTo: (state) => compareYearMonth(state.month, retirementStart) >= 0,
     apply: (state) => {
-      const spending = roundMoney(inputs.monthlyRetirementSpending * state.inflationIndex);
+      const recipeSpending = retirementSpendingForState(inputs, state, retirementStart, recipe);
+      const spending = roundMoney(recipeSpending.monthlyAmount);
       const accessMonth = retirementAccessMonth(inputs);
       const events: SimulationEvent[] = [];
       let accounts = state.accounts;
@@ -393,6 +591,7 @@ function retirementWithdrawalEffect(inputs: RetirementPlanInputs, retirementStar
           accountId: NON_RETIREMENT_ACCOUNT_ID,
           amount: -nonRetirementWithdrawal.withdrawn,
           description: "Paid retirement spending from non-retirement portfolio.",
+          metadata: recipeSpending.ruleIds.length > 0 ? { recipeRuleIds: recipeSpending.ruleIds } : undefined,
         });
       }
 
@@ -429,7 +628,11 @@ function retirementWithdrawalEffect(inputs: RetirementPlanInputs, retirementStar
           description: beforeAccess
             ? "Paid retirement spending from retirement portfolio with early-access penalty."
             : "Paid retirement spending from retirement portfolio.",
-          metadata: beforeAccess ? { penaltyRate: inputs.earlyWithdrawalPenalty, netProvided } : { netProvided },
+          metadata: {
+            ...(beforeAccess ? { penaltyRate: inputs.earlyWithdrawalPenalty } : {}),
+            netProvided,
+            ...(recipeSpending.ruleIds.length > 0 ? { recipeRuleIds: recipeSpending.ruleIds } : {}),
+          },
         });
       }
 
@@ -442,6 +645,105 @@ function retirementWithdrawalEffect(inputs: RetirementPlanInputs, retirementStar
           amount: remaining,
           description: "Portfolio could not fund the requested retirement spending.",
         });
+      }
+
+      return { state: { ...state, accounts }, events };
+    },
+  };
+}
+
+function recipeEffect(recipe: ScenarioRecipe | null, retirementStart: YearMonth): Effect {
+  return {
+    id: "recipe-actions",
+    description: "Scenario recipe actions",
+    appliesTo: () => recipe !== null,
+    apply: (state) => {
+      let accounts = state.accounts;
+      const events: SimulationEvent[] = [];
+
+      for (const rule of recipe?.rules ?? []) {
+        if (!recipeRuleMatches(rule, { ...state, accounts }, retirementStart)) continue;
+
+        for (const action of rule.actions) {
+          if (action.type === "setRetirementSpending" || action.type === "setRetirementSpendingFromPortfolioPercentage") {
+            continue;
+          }
+
+          if (action.type === "addAmount") {
+            const amount = recipeActionAmount(action, state);
+            if (amount === 0) continue;
+            const assetClass = action.assetClass ?? "cash";
+            accounts = addToBalance(accounts, action.accountId, assetClass, amount);
+            events.push({
+              month: state.month,
+              effectId: `recipe-${rule.id}`,
+              kind: action.kind ?? (amount < 0 ? "expense" : "income"),
+              accountId: action.accountId,
+              assetClass,
+              amount,
+              description: action.description ?? rule.description ?? `Applied recipe rule ${rule.id}.`,
+              metadata: { recipeRuleId: rule.id, actionType: action.type },
+            });
+          } else if (action.type === "transfer") {
+            const requestedAmount = recipeActionAmount(action, state);
+            const available = getBalance(accounts, action.fromAccountId, action.fromAssetClass ?? "cash");
+            const amount = action.limitToAvailable ? roundMoney(Math.min(Math.max(0, available), requestedAmount)) : requestedAmount;
+            if (amount === 0) continue;
+            const fromAssetClass = action.fromAssetClass ?? "cash";
+            const toAssetClass = action.toAssetClass ?? "cash";
+            accounts = transferBalance(accounts, action.fromAccountId, fromAssetClass, action.toAccountId, toAssetClass, amount);
+            events.push({
+              month: state.month,
+              effectId: `recipe-${rule.id}`,
+              kind: action.kind ?? "transfer",
+              accountId: action.fromAccountId,
+              assetClass: fromAssetClass,
+              amount: -amount,
+              description: action.description ?? rule.description ?? `Applied recipe rule ${rule.id}.`,
+              metadata: {
+                recipeRuleId: rule.id,
+                actionType: action.type,
+                toAccountId: action.toAccountId,
+                toAssetClass,
+              },
+            });
+          } else {
+            const assetClass = action.assetClass ?? "cash";
+            const currentBalance = getBalance(accounts, action.accountId, assetClass);
+            const deficit = roundMoney(Math.max(0, action.targetBalance - currentBalance));
+            if (deficit === 0) continue;
+
+            const penaltyRate = action.penaltyRate ?? 0;
+            const grossNeeded = roundMoney(deficit / Math.max(0.01, 1 - penaltyRate));
+            const fromAssetClass = action.fromAssetClass ?? "cash";
+            const available = getBalance(accounts, action.fromAccountId, fromAssetClass);
+            const grossAmount = action.limitToAvailable ? roundMoney(Math.min(Math.max(0, available), grossNeeded)) : grossNeeded;
+            const netAmount = roundMoney(grossAmount * (1 - penaltyRate));
+            if (grossAmount === 0 || netAmount === 0) continue;
+
+            accounts = addToBalance(accounts, action.fromAccountId, fromAssetClass, -grossAmount);
+            accounts = addToBalance(accounts, action.accountId, assetClass, netAmount);
+            events.push({
+              month: state.month,
+              effectId: `recipe-${rule.id}`,
+              kind: action.kind ?? "transfer",
+              accountId: action.fromAccountId,
+              assetClass: fromAssetClass,
+              amount: -grossAmount,
+              description: action.description ?? rule.description ?? `Applied recipe rule ${rule.id}.`,
+              metadata: {
+                recipeRuleId: rule.id,
+                actionType: action.type,
+                toAccountId: action.accountId,
+                toAssetClass: assetClass,
+                targetBalance: action.targetBalance,
+                deficit,
+                penaltyRate,
+                netProvided: netAmount,
+              },
+            });
+          }
+        }
       }
 
       return { state: { ...state, accounts }, events };
@@ -506,6 +808,235 @@ function withdrawFromAccount(accounts: Accounts, accountId: string, requested: n
   }
 
   return { accounts: next, withdrawn };
+}
+
+function validateRecipeAccount(account: unknown): asserts account is RecipeAccount {
+  if (!account || typeof account !== "object") throw new Error("Recipe account must be an object.");
+  const candidate = account as Partial<RecipeAccount>;
+  if (!candidate.id || typeof candidate.id !== "string") throw new Error("Recipe account must include an id.");
+  if (!candidate.name || typeof candidate.name !== "string") throw new Error(`Recipe account ${candidate.id} must include a name.`);
+  if (!candidate.kind || typeof candidate.kind !== "string") throw new Error(`Recipe account ${candidate.id} must include a kind.`);
+  if (!candidate.balances || typeof candidate.balances !== "object") {
+    throw new Error(`Recipe account ${candidate.id} must include balances.`);
+  }
+  for (const [assetClass, balance] of Object.entries(candidate.balances)) {
+    if (!assetClass || !Number.isFinite(balance)) {
+      throw new Error(`Recipe account ${candidate.id} balances must be finite numbers.`);
+    }
+  }
+}
+
+function validateRecipeRule(rule: unknown, index: number, accountIds: Set<string>): asserts rule is RecipeRule {
+  if (!rule || typeof rule !== "object") throw new Error(`Recipe rule ${index + 1} must be an object.`);
+  const candidate = rule as Partial<RecipeRule>;
+  if (!candidate.id || typeof candidate.id !== "string") throw new Error(`Recipe rule ${index + 1} must include an id.`);
+  if (!Array.isArray(candidate.actions) || candidate.actions.length === 0) {
+    throw new Error(`Recipe rule ${candidate.id} must include at least one action.`);
+  }
+  const conditions = Array.isArray(candidate.when) ? candidate.when : candidate.when ? [candidate.when] : [];
+  for (const condition of conditions) {
+    validateRecipeCondition(condition, candidate.id, accountIds);
+  }
+
+  for (const action of candidate.actions) {
+    if (!action || typeof action !== "object") throw new Error(`Recipe rule ${candidate.id} has an invalid action.`);
+    const maybeAction = action as Partial<RecipeAction>;
+    const maybeKind = (action as { kind?: unknown }).kind;
+    const maybePeriod = (action as { period?: unknown }).period;
+    if (
+      maybeAction.type !== "setRetirementSpending" &&
+      maybeAction.type !== "setRetirementSpendingFromPortfolioPercentage" &&
+      maybeAction.type !== "addAmount" &&
+      maybeAction.type !== "transfer" &&
+      maybeAction.type !== "topUpAccount"
+    ) {
+      throw new Error(`Recipe action in ${candidate.id} has an unsupported type.`);
+    }
+    if (
+      (maybeAction.type === "setRetirementSpending" || maybeAction.type === "addAmount" || maybeAction.type === "transfer") &&
+      !Number.isFinite(maybeAction.amount)
+    ) {
+      throw new Error(`Recipe action in ${candidate.id} must include a finite amount.`);
+    }
+    if (maybePeriod !== undefined && maybePeriod !== "monthly" && maybePeriod !== "annual") {
+      throw new Error(`Recipe action in ${candidate.id} has an unsupported period.`);
+    }
+    if (maybeKind !== undefined && (typeof maybeKind !== "string" || !RECIPE_EVENT_KINDS.has(maybeKind as EventKind))) {
+      throw new Error(`Recipe action in ${candidate.id} has an unsupported event kind.`);
+    }
+    if (maybeAction.type === "addAmount") {
+      if (!maybeAction.accountId) throw new Error(`Recipe addAmount action in ${candidate.id} must include an accountId.`);
+      if (!accountIds.has(maybeAction.accountId)) {
+        throw new Error(`Recipe addAmount action in ${candidate.id} references unknown account ${maybeAction.accountId}.`);
+      }
+    }
+    if (maybeAction.type === "transfer") {
+      if (!maybeAction.fromAccountId) throw new Error(`Recipe transfer action in ${candidate.id} must include a fromAccountId.`);
+      if (!maybeAction.toAccountId) throw new Error(`Recipe transfer action in ${candidate.id} must include a toAccountId.`);
+      if (!accountIds.has(maybeAction.fromAccountId)) {
+        throw new Error(`Recipe transfer action in ${candidate.id} references unknown account ${maybeAction.fromAccountId}.`);
+      }
+      if (!accountIds.has(maybeAction.toAccountId)) {
+        throw new Error(`Recipe transfer action in ${candidate.id} references unknown account ${maybeAction.toAccountId}.`);
+      }
+    }
+    if (maybeAction.type === "setRetirementSpendingFromPortfolioPercentage") {
+      if (!Number.isFinite(maybeAction.annualPercentage)) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} must include a finite annualPercentage.`);
+      }
+      if (maybeAction.minimumAmount !== undefined && !Number.isFinite(maybeAction.minimumAmount)) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} has an invalid minimumAmount.`);
+      }
+      if (
+        maybeAction.minimumPeriod !== undefined &&
+        maybeAction.minimumPeriod !== "monthly" &&
+        maybeAction.minimumPeriod !== "annual"
+      ) {
+        throw new Error(`Recipe portfolio spending action in ${candidate.id} has an unsupported minimumPeriod.`);
+      }
+      for (const accountId of maybeAction.accountIds ?? []) {
+        if (!accountIds.has(accountId)) {
+          throw new Error(`Recipe portfolio spending action in ${candidate.id} references unknown account ${accountId}.`);
+        }
+      }
+    }
+    if (maybeAction.type === "topUpAccount") {
+      if (!maybeAction.accountId) throw new Error(`Recipe topUpAccount action in ${candidate.id} must include an accountId.`);
+      if (!accountIds.has(maybeAction.accountId)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} references unknown account ${maybeAction.accountId}.`);
+      }
+      if (!maybeAction.fromAccountId) throw new Error(`Recipe topUpAccount action in ${candidate.id} must include a fromAccountId.`);
+      if (!accountIds.has(maybeAction.fromAccountId)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} references unknown account ${maybeAction.fromAccountId}.`);
+      }
+      if (!Number.isFinite(maybeAction.targetBalance)) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} must include a finite targetBalance.`);
+      }
+      if (
+        maybeAction.penaltyRate !== undefined &&
+        (!Number.isFinite(maybeAction.penaltyRate) || maybeAction.penaltyRate < 0 || maybeAction.penaltyRate >= 1)
+      ) {
+        throw new Error(`Recipe topUpAccount action in ${candidate.id} has an invalid penaltyRate.`);
+      }
+    }
+  }
+}
+
+function validateRecipeCondition(condition: unknown, ruleId: string, accountIds: Set<string>): asserts condition is RecipeCondition {
+  if (!condition || typeof condition !== "object") throw new Error(`Recipe rule ${ruleId} has an invalid condition.`);
+  const candidate = condition as Partial<RecipeCondition>;
+
+  if (candidate.source === "retired") {
+    if (typeof candidate.equals !== "boolean") throw new Error(`Recipe condition in ${ruleId} must include a boolean equals value.`);
+    return;
+  }
+
+  if (
+    candidate.source !== "accountTotal" &&
+    candidate.source !== "accountBalance" &&
+    candidate.source !== "portfolioTotal" &&
+    candidate.source !== "monthIndex" &&
+    candidate.source !== "month"
+  ) {
+    throw new Error(`Recipe condition in ${ruleId} has an unsupported source.`);
+  }
+  if (!isRecipeComparisonOperator(candidate.operator)) {
+    throw new Error(`Recipe condition in ${ruleId} has an unsupported operator.`);
+  }
+  if (candidate.source === "month") {
+    if (typeof candidate.value !== "string") throw new Error(`Recipe condition in ${ruleId} must include a month value.`);
+    parseYearMonth(candidate.value);
+  } else if (!Number.isFinite(candidate.value)) {
+    throw new Error(`Recipe condition in ${ruleId} must include a finite value.`);
+  }
+
+  if (candidate.source === "accountTotal" || candidate.source === "accountBalance") {
+    if (!candidate.accountId) throw new Error(`Recipe condition in ${ruleId} must include an accountId.`);
+    if (!accountIds.has(candidate.accountId)) {
+      throw new Error(`Recipe condition in ${ruleId} references unknown account ${candidate.accountId}.`);
+    }
+  }
+  if (candidate.source === "accountBalance" && !candidate.assetClass) {
+    throw new Error(`Recipe condition in ${ruleId} must include an assetClass.`);
+  }
+  if (candidate.source === "portfolioTotal" && candidate.accountIds !== undefined && !Array.isArray(candidate.accountIds)) {
+    throw new Error(`Recipe condition in ${ruleId} accountIds must be an array.`);
+  }
+  for (const accountId of candidate.source === "portfolioTotal" ? candidate.accountIds ?? [] : []) {
+    if (typeof accountId !== "string" || !accountIds.has(accountId)) {
+      throw new Error(`Recipe condition in ${ruleId} references unknown account ${accountId}.`);
+    }
+  }
+}
+
+function recipeRuleMatches(rule: RecipeRule, state: SimulationState, retirementStart: YearMonth): boolean {
+  const conditions = Array.isArray(rule.when) ? rule.when : rule.when ? [rule.when] : [];
+  return conditions.every((condition) => recipeConditionMatches(condition, state, retirementStart));
+}
+
+function recipeConditionMatches(condition: RecipeCondition, state: SimulationState, retirementStart: YearMonth): boolean {
+  if (condition.source === "retired") {
+    return (compareYearMonth(state.month, retirementStart) >= 0) === condition.equals;
+  }
+  if (condition.source === "month") {
+    return compareNumbers(compareYearMonth(state.month, condition.value), condition.operator, 0);
+  }
+
+  const actual = recipeConditionValue(condition, state);
+  return compareNumbers(actual, condition.operator, condition.value);
+}
+
+function recipeConditionValue(condition: Exclude<RecipeCondition, { source: "retired" } | { source: "month" }>, state: SimulationState): number {
+  if (condition.source === "accountTotal") return accountTotal(state.accounts, condition.accountId);
+  if (condition.source === "accountBalance") return getBalance(state.accounts, condition.accountId, condition.assetClass);
+  if (condition.source === "monthIndex") return state.monthIndex;
+  return (condition.accountIds ?? Object.keys(state.accounts)).reduce((sum, accountId) => sum + accountTotal(state.accounts, accountId), 0);
+}
+
+function recipeActionAmount(action: Extract<RecipeAction, { type: "addAmount" | "transfer" }>, state: SimulationState): number {
+  const monthlyAmount = action.period === "annual" ? action.amount / 12 : action.amount;
+  const adjustedAmount = action.inflationAdjusted === false ? monthlyAmount : monthlyAmount * state.inflationIndex;
+  return roundMoney(adjustedAmount);
+}
+
+function recipeAccounts(recipe: ScenarioRecipe | null): Accounts {
+  return Object.fromEntries(
+    (recipe?.accounts ?? []).map((account) => [
+      account.id,
+      {
+        ...account,
+        balances: Object.fromEntries(
+          Object.entries(account.balances).map(([assetClass, balance]) => [assetClass, roundMoney(balance)]),
+        ),
+        metadata: account.metadata ? { ...account.metadata } : undefined,
+      },
+    ]),
+  );
+}
+
+function compareNumbers(actual: number, operator: RecipeComparisonOperator, expected: number): boolean {
+  switch (operator) {
+    case "<":
+      return actual < expected;
+    case "<=":
+      return actual <= expected;
+    case ">":
+      return actual > expected;
+    case ">=":
+      return actual >= expected;
+    case "==":
+      return actual === expected;
+    case "!=":
+      return actual !== expected;
+  }
+}
+
+function isRecipeComparisonOperator(operator: unknown): operator is RecipeComparisonOperator {
+  return operator === "<" || operator === "<=" || operator === ">" || operator === ">=" || operator === "==" || operator === "!=";
+}
+
+function accountTotal(accounts: Accounts, accountId: string): number {
+  return Object.values(accounts[accountId]?.balances ?? {}).reduce((sum, value) => sum + value, 0);
 }
 
 function allocatedAccount(options: {
