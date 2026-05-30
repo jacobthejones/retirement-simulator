@@ -362,16 +362,33 @@ label > span {
   line-height: 1.35;
 }
 
-.modifiers {
+.modifiers,
+.recipe-editor {
   margin-top: 14px;
   border-top: 2px solid var(--ink);
   padding-top: 12px;
 }
 
-.modifiers summary {
+.modifiers summary,
+.recipe-editor summary {
   cursor: pointer;
   font-weight: 850;
   margin-bottom: 10px;
+}
+
+.recipe-textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: #fff;
+  color: var(--text);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px;
+  tab-size: 2;
 }
 
 .modifier-list {
