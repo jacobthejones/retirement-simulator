@@ -8,3 +8,4 @@ web-dist/
 ynab_*.json
 workbook_summary.json
 retirement_analysis.md
+.pnpm-store/
