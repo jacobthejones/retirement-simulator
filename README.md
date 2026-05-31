@@ -34,11 +34,20 @@ pnpm preview
 
 The app is fully client-side. `preview` serves the production build from `web-dist/`.
 
-## Test
+## Validation
+
+```sh
+pnpm validate
+```
+
+Use this as the default repo health check. It runs type checking, the Vitest suite, and a production build.
+
+## Individual Checks
 
 ```sh
 pnpm check
 pnpm test
+pnpm build
 ```
 
 ## Model
