@@ -9,7 +9,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "vite --host 127.0.0.1",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate": "pnpm check && pnpm test && pnpm build"
   },
   "dependencies": {
     "@vercel/analytics": "^2.0.1",
