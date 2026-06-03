@@ -99,20 +99,14 @@ Persisting scenarios in local storage is appropriate for a single-user browser a
 
 ## Automated Feedback Today
 
-The repo now has a clear local validation entrypoint:
+The repo has a clear intended local validation entrypoint:
 
 - `pnpm check` runs TypeScript type checking.
 - `pnpm test` runs the Vitest suite.
 - `pnpm build` verifies the production build.
 - `pnpm validate` is the documented full health check and runs all three.
 
-At the time of this review, these checks succeeded locally:
-
-- `./node_modules/.bin/tsc -p tsconfig.json --noEmit`
-- `./node_modules/.bin/vitest run`
-- `./node_modules/.bin/vite build`
-
-Vitest currently reports `44` passing tests across `6` test files. The suite covers:
+The current source-level test surface covers:
 
 - low-level engine and money behavior
 - date utilities
@@ -129,6 +123,7 @@ The command surface is better than it was previously, but enforcement is still w
 - There is no dedicated regression fixture layer asserting exact `findEarliestRetirementMonth()` outputs across representative plans.
 - There are no dedicated tests for scenario persistence or the worker message protocol.
 - Recipe examples in `RecipeEditor.tsx` are valuable user-facing documentation, but there is no single shared source that guarantees those examples stay aligned with the parser and tests.
+- Ephemeral worktrees depend on local dependency installation before any of the validation commands can run, but the repo does not expose a single bootstrap command or clearly documented setup guard for automation.
 
 For LLM-led maintenance, those gaps matter more than stylistic cleanup. The easiest way for this repo to stay safe is for correctness checks to be obvious, realistic, and unavoidable.
 
@@ -141,6 +136,7 @@ The command already exists and should remain the one prominent "is the repo safe
 - run `pnpm validate` in CI on every branch and pull request
 - require that job before merge
 - add a lightweight pre-push hook that runs the same command locally before changes land
+- document one bootstrap path such as `pnpm install --frozen-lockfile && pnpm validate` for fresh worktrees and automation
 
 The key principle is to avoid a second validation system. CI, docs, humans, and automation should all point at the same command.
 
