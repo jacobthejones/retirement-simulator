@@ -4,64 +4,24 @@ import { Analytics } from "@vercel/analytics/react";
 import {
   defaultRetirementPlanInputs,
   type RetirementPlanInputs,
-  type RetirementSearchResult,
 } from "../retirementDate.js";
 import type { YearMonth } from "../types.js";
 import { ComparisonTables } from "./ComparisonTables.js";
+import { loadState, saveState } from "./scenarioStorage.js";
 import { ScenarioEditor } from "./ScenarioEditor.js";
 import type { ScenarioState } from "./types.js";
 import type { WorkerResponse } from "./worker.js";
-
-const STORAGE_KEY = "retirement-simulator-v1";
-
-function loadState(): { scenarios: ScenarioState[]; selectedScenarioId: string } | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const state = JSON.parse(raw) as { scenarios: ScenarioState[]; selectedScenarioId: string };
-    return {
-      ...state,
-      scenarios: state.scenarios.map((scenario) => ({
-        ...scenario,
-        inputs: {
-          ...defaultRetirementPlanInputs,
-          ...scenario.inputs,
-          allocation: { ...defaultRetirementPlanInputs.allocation, ...scenario.inputs.allocation },
-          modifiers: scenario.inputs.modifiers ?? [],
-          recipeJson: scenario.inputs.recipeJson ?? "",
-        },
-      })),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function saveState(scenarios: ScenarioState[], selectedScenarioId: string): void {
-  try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        selectedScenarioId,
-        scenarios: scenarios.map((s) => ({
-          ...s,
-          result: s.result ? ({ ...s.result, historicalSet: null } satisfies RetirementSearchResult) : null,
-        })),
-      }),
-    );
-  } catch {
-    // localStorage unavailable or full
-  }
-}
 
 const defaultScenarios: ScenarioState[] = [
   { id: "scenario-1", inputs: { ...defaultRetirementPlanInputs, name: "Scenario 1" }, result: null, error: null },
 ];
 
 export function App(): ReactElement {
-  const [scenarios, setScenarios] = useState<ScenarioState[]>(() => loadState()?.scenarios ?? defaultScenarios);
+  const [scenarios, setScenarios] = useState<ScenarioState[]>(
+    () => loadState(localStorage)?.scenarios ?? defaultScenarios,
+  );
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>(
-    () => loadState()?.selectedScenarioId ?? "scenario-1",
+    () => loadState(localStorage)?.selectedScenarioId ?? "scenario-1",
   );
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalcProgress, setRecalcProgress] = useState<{
@@ -74,7 +34,7 @@ export function App(): ReactElement {
   const selectedScenario = scenarios.find((s) => s.id === selectedScenarioId) ?? scenarios[0]!;
 
   useEffect(() => {
-    saveState(scenarios, selectedScenarioId);
+    saveState(localStorage, scenarios, selectedScenarioId);
   }, [scenarios, selectedScenarioId]);
 
   useEffect(() => {
